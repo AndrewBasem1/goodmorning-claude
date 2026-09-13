@@ -2,12 +2,12 @@ name: goodmorning claude
 
 on:
   schedule:
-    # I tick schedulati NON sono la copertura primaria (GitHub li ritarda/salta
-    # sotto carico, a volte per ore). Servono da RETE DI SICUREZZA e da STAFFETTA:
-    # mentre un run tiene la finestra calda con un loop interno (~6h, vedi sotto),
-    # ogni tick resta in coda grazie a `concurrency` e fa ripartire il loop
-    # all'istante quando quello in corso finisce (o se mai si interrompe).
-    # Sfasati dal minuto 0 (2,7,...,57) come consiglia GitHub.
+    # Scheduled ticks are NOT the primary coverage (GitHub delays/skips them
+    # under load, sometimes for hours). They serve as a SAFETY NET and RELAY:
+    # while one run keeps the window warm with an internal loop (~6h, see below),
+    # each tick stays queued via `concurrency` and restarts the loop instantly
+    # when the current one finishes (or if it ever gets interrupted).
+    # Offset from minute 0 (2,7,...,57) as GitHub recommends.
     - cron: "2-59/5 * * * *"
   workflow_dispatch: {}
 
@@ -21,29 +21,29 @@ concurrency:
 jobs:
   good-morning:
     runs-on: ubuntu-latest
-    # ~6h e' il tetto massimo di un job: restiamo appena sotto. Il loop esce a
-    # 345 min e lascia il testimone al run schedulato rimasto in coda.
+    # ~6h is the max job duration: we stay just under. The loop exits at
+    # 345 min and hands off to the scheduled run waiting in the queue.
     timeout-minutes: 350
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Keep the 5h window warm (check ogni 5 min dentro lo stesso run)
+      - name: Keep the 5h window warm (check every 5 min within the same run)
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
-          set +e  # un errore transitorio (rete/API/push) non deve fermare il loop
+          set +e  # a transient error (network/API/push) must not stop the loop
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # La cadenza "ogni 5 minuti" e' garantita QUI DENTRO con sleep, quindi
-          # non dipende dallo scheduler di GitHub. Lo script decide ogni giro se
-          # inviare il "goodmorning claude" (finestra scaduta) o uscire subito (attiva).
+          # The "every 5 minutes" cadence is guaranteed HERE with sleep, so it
+          # doesn't depend on GitHub's scheduler. The script decides each iteration
+          # whether to send the "goodmorning claude" (window expired) or exit (active).
           deadline=$(( $(date +%s) + 345 * 60 ))
           while :; do
             echo "::group::check $(date -u +%H:%M:%S)Z"
             python automation/good_morning.py
-            # Persisti lo stato solo quando cambia (~1 volta ogni finestra 5h),
-            # cosi' i run schedulati di riserva sanno quando scade la finestra.
+            # Persist state only when it changes (~once per 5h window),
+            # so backup scheduled runs know when the window expires.
             if ! git diff --quiet automation/state.json; then
               cp automation/state.json /tmp/state.json
               git fetch origin main

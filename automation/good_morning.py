@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
-"""goodmorning claude — pre-warm della finestra 5h di Claude (Pro/Max).
+"""goodmorning claude — pre-warm Claude's 5h usage window (Pro/Max).
 
-Avvia la finestra di utilizzo di 5 ore del piano Claude il prima possibile,
-restando sincronizzato con l'orario di reset REALE del tuo account.
+Starts the 5-hour Claude plan usage window as early as possible,
+staying in sync with your account's REAL reset time.
 
-Come funziona:
-1. Legge da state.json l'orario di reset reale salvato nell'ultimo run.
-2. Se il reset e' nel futuro -> finestra ancora attiva -> esce subito,
-   zero chiamate API.
-3. Se il reset e' passato (o lo stato manca) -> manda il "goodmorning claude": una
-   chiamata minimale (1 token, modello haiku) a /v1/messages con il token
-   OAuth di Claude Code. Quella singola chiamata avvia la nuova finestra 5h
-   E restituisce negli header di risposta anthropic-ratelimit-unified-5h-*
-   l'orario di reset reale.
-4. Salva il nuovo orario di reset in state.json (committato dal workflow):
-   i run successivi sanno esattamente quando scade la finestra, anche se
-   l'hai avviata tu stesso usando Claude prima dell'automazione.
+How it works:
+1. Reads the real reset time saved in state.json from the last run.
+2. If the reset is in the future -> window still active -> exits immediately,
+   zero API calls.
+3. If the reset is in the past (or state is missing) -> sends the "goodmorning
+   claude": a minimal call (1 token, haiku model) to /v1/messages with the
+   Claude Code OAuth token. That single call starts the new 5h window AND
+   returns the real reset time in the anthropic-ratelimit-unified-5h-*
+   response headers.
+4. Saves the new reset time to state.json (committed by the workflow):
+   subsequent runs know exactly when the window expires, even if you
+   started it yourself by using Claude before the automation ran.
 
-Nota: l'endpoint /api/oauth/usage NON e' utilizzabile qui — il token di
-`claude setup-token` non ha lo scope user:profile (risponde 403). Gli header
-di rate-limit della risposta messages sono la fonte ufficiale equivalente.
+Note: the /api/oauth/usage endpoint is NOT usable here — the token from
+`claude setup-token` lacks the user:profile scope (returns 403). The
+rate-limit headers from the messages response are the equivalent official source.
 
-Pensato per essere richiamato in loop da GitHub Actions (un check ogni ~5
-min dentro lo stesso run, vedi il workflow), con il PC spento. Ogni
-invocazione e' single-shot: controlla una volta e invia o esce.
-Richiede: CLAUDE_CODE_OAUTH_TOKEN (generato con `claude setup-token`).
+Designed to be called in a loop by GitHub Actions (a check every ~5 min
+within the same run, see the workflow), with the PC off. Each invocation
+is single-shot: checks once and either sends or exits.
+Requires: CLAUDE_CODE_OAUTH_TOKEN (generated with `claude setup-token`).
 """
 
 import json
@@ -37,14 +37,14 @@ from pathlib import Path
 
 MESSAGES_ENDPOINT = "https://api.anthropic.com/v1/messages"
 STATE_FILE = Path(__file__).parent / "state.json"
-WINDOW_HOURS = 5  # stima di riserva, usata solo se l'header di reset sparisse
+WINDOW_HOURS = 5  # fallback estimate, used only if the reset header disappears
 GREETING = "gooodmorning claudeee!!!  (dont respond to this message)"
-CLAUDE_MODEL = "claude-haiku-4-5-20251001"  # il piu' economico: basta 1 token
+CLAUDE_MODEL = "claude-haiku-4-5-20251001"  # cheapest model: 1 token is enough
 RESET_HEADER = "anthropic-ratelimit-unified-5h-reset"
 UTILIZATION_HEADER = "anthropic-ratelimit-unified-5h-utilization"
 HTTP_TIMEOUT_S = 60
-# Il token di `claude setup-token` e' accettato da /v1/messages solo
-# presentandosi come Claude Code: servono header beta e system prompt dedicati.
+# The `claude setup-token` token is accepted by /v1/messages only when
+# presenting as Claude Code: requires beta header and dedicated system prompt.
 OAUTH_BETA = "oauth-2025-04-20"
 CLAUDE_CODE_SYSTEM = "You are Claude Code, Anthropic's official CLI for Claude."
 
@@ -56,8 +56,8 @@ def log(msg: str) -> None:
 def get_token() -> str:
     token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
     if not token:
-        log("ERRORE: variabile CLAUDE_CODE_OAUTH_TOKEN mancante.")
-        log("Generala in locale con `claude setup-token` e impostala come secret.")
+        log("ERROR: CLAUDE_CODE_OAUTH_TOKEN environment variable is missing.")
+        log("Generate it locally with `claude setup-token` and set it as a secret.")
         sys.exit(1)
     return token
 
@@ -86,7 +86,7 @@ def parse_iso(value) -> datetime | None:
 
 
 def parse_reset_header(headers) -> datetime | None:
-    """L'header di reset e' un timestamp epoch in secondi."""
+    """The reset header is an epoch timestamp in seconds."""
     raw = headers.get(RESET_HEADER)
     if raw is None:
         return None
@@ -98,12 +98,12 @@ def parse_reset_header(headers) -> datetime | None:
 
 def describe(dt: datetime, now: datetime) -> str:
     delta = str(dt - now).split(".")[0]
-    return f"{dt.isoformat(timespec='seconds')} (tra {delta})"
+    return f"{dt.isoformat(timespec='seconds')} (in {delta})"
 
 
 def send_good_morning(token: str) -> datetime | None:
-    """Manda il "goodmorning claude" e ritorna l'orario di reset reale, o None se fallisce."""
-    log(f"Invio {GREETING!r} (1 token, {CLAUDE_MODEL})...")
+    """Send the "goodmorning claude" and return the real reset time, or None on failure."""
+    log(f"Sending {GREETING!r} (1 token, {CLAUDE_MODEL})...")
     payload = json.dumps({
         "model": CLAUDE_MODEL,
         "max_tokens": 1,
@@ -128,35 +128,35 @@ def send_good_morning(token: str) -> datetime | None:
             reset = parse_reset_header(resp.headers)
             utilization = resp.headers.get(UTILIZATION_HEADER, "?")
             if reset is None:
-                log(f"ATTENZIONE: risposta OK ma senza header {RESET_HEADER} "
-                    f"(forse l'API e' cambiata). Uso la stima di {WINDOW_HOURS}h da adesso.")
+                log(f"WARNING: response OK but missing {RESET_HEADER} header "
+                    f"(API may have changed). Using {WINDOW_HOURS}h estimate from now.")
                 return now + timedelta(hours=WINDOW_HOURS)
-            log(f"Messaggio inviato. Finestra 5h: utilizzo {utilization}, "
-                f"reset reale alle {describe(reset, now)}.")
+            log(f"Message sent. 5h window: utilization {utilization}, "
+                f"real reset at {describe(reset, now)}.")
             return reset
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")[:300]
         if exc.code == 429:
-            # Limite raggiunto = la finestra e' per forza attiva: gli header
-            # ci dicono comunque quando si resetta.
+            # Rate limit hit = the window is necessarily active: the headers
+            # still tell us when it resets.
             reset = parse_reset_header(exc.headers)
             if reset is not None:
-                log(f"Limite 5h gia' esaurito: la finestra e' comunque attiva, "
-                    f"reset alle {describe(reset, now)}.")
+                log(f"5h limit already exhausted: window is still active, "
+                    f"reset at {describe(reset, now)}.")
                 return reset
-            log(f"ERRORE: limite raggiunto (429) ma senza header di reset. Dettaglio: {body}")
+            log(f"ERROR: rate limited (429) but no reset header. Detail: {body}")
             return None
         if exc.code in (401, 403):
-            log(f"ERRORE: il token non e' valido o e' scaduto (HTTP {exc.code}).")
-            log("Rigenera il token con `claude setup-token` e aggiorna il secret "
-                "CLAUDE_CODE_OAUTH_TOKEN del repo.")
-            log(f"Dettaglio API: {body}")
+            log(f"ERROR: token is invalid or expired (HTTP {exc.code}).")
+            log("Regenerate the token with `claude setup-token` and update the "
+                "CLAUDE_CODE_OAUTH_TOKEN repo secret.")
+            log(f"API detail: {body}")
             return None
-        log(f"ERRORE: l'API ha risposto HTTP {exc.code}. Dettaglio: {body}")
-        log("Riprovera' automaticamente al prossimo run schedulato.")
+        log(f"ERROR: API responded with HTTP {exc.code}. Detail: {body}")
+        log("Will retry automatically on the next scheduled run.")
         return None
     except (urllib.error.URLError, TimeoutError) as exc:
-        log(f"ERRORE di rete verso l'API ({exc}). Riprovera' al prossimo run.")
+        log(f"Network ERROR reaching the API ({exc}). Will retry on the next run.")
         return None
 
 
@@ -166,15 +166,15 @@ def main() -> int:
 
     resets_at = parse_iso(read_state().get("resets_at"))
     if resets_at is None:
-        log("Nessun orario di reset salvato in state.json: invio il 'goodmorning claude' "
-            "per scoprire (ed eventualmente avviare) la finestra corrente.")
+        log("No reset time saved in state.json: sending 'goodmorning claude' "
+            "to discover (and possibly start) the current window.")
     elif now < resets_at:
-        log(f"Finestra 5h ancora attiva: reset alle {describe(resets_at, now)}. "
-            f"Nessuna chiamata API, esco.")
+        log(f"5h window still active: reset at {describe(resets_at, now)}. "
+            f"No API call needed, exiting.")
         return 0
     else:
-        log(f"La finestra precedente si e' resettata alle "
-            f"{resets_at.isoformat(timespec='seconds')}: ne avvio una nuova.")
+        log(f"Previous window reset at "
+            f"{resets_at.isoformat(timespec='seconds')}: starting a new one.")
 
     new_reset = send_good_morning(token)
     if new_reset is None:
@@ -184,8 +184,8 @@ def main() -> int:
         "resets_at": new_reset.isoformat(timespec="seconds"),
         "checked_at": now.isoformat(timespec="seconds"),
     })
-    log(f"Sincronizzato con il limite reale: prossimo reset alle "
-        f"{describe(new_reset, datetime.now(timezone.utc))}. Buona giornata!")
+    log(f"Synced with real limit: next reset at "
+        f"{describe(new_reset, datetime.now(timezone.utc))}. Have a great day!")
     return 0
 
 

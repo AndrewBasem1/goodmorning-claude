@@ -4,5 +4,5 @@ __pycache__/
 .DS_Store
 .preview/
 
-# Doc interno, fuori dal repo pubblico (resta in locale)
+# Internal doc, kept out of the public repo (stays local)
 PRODUCT.md
