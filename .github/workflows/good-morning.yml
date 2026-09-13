@@ -31,6 +31,7 @@ jobs:
       - name: Keep the 5h window warm (check every 5 min within the same run)
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          TARGET_RESET_UTC: ${{ vars.TARGET_RESET_UTC }}
         run: |
           set +e  # a transient error (network/API/push) must not stop the loop
           git config user.name "github-actions[bot]"

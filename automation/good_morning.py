@@ -24,6 +24,15 @@ rate-limit headers from the messages response are the equivalent official source
 Designed to be called in a loop by GitHub Actions (a check every ~5 min
 within the same run, see the workflow), with the PC off. Each invocation
 is single-shot: checks once and either sends or exits.
+
+Optional: set TARGET_RESET_UTC="HH:MM" to align the window so it resets
+at a specific UTC time (e.g. "12:00"). When the target is <5h away, the
+script delays starting the new window until target-5h so it lands exactly.
+When >=5h away, it starts immediately (the window will naturally expire
+and need another cycle before the target). Set this as a GitHub Actions
+repository variable (vars.TARGET_RESET_UTC). Leave unset for the default
+behavior of keeping the window perpetually warm.
+
 Requires: CLAUDE_CODE_OAUTH_TOKEN (generated with `claude setup-token`).
 """
 
@@ -43,6 +52,11 @@ CLAUDE_MODEL = "claude-haiku-4-5-20251001"  # cheapest model: 1 token is enough
 RESET_HEADER = "anthropic-ratelimit-unified-5h-reset"
 UTILIZATION_HEADER = "anthropic-ratelimit-unified-5h-utilization"
 HTTP_TIMEOUT_S = 60
+# Optional: set TARGET_RESET_UTC="HH:MM" to align the window so it resets at
+# that UTC time. If the target is <5h away, the script delays starting the
+# window until target-5h. If >=5h away, it starts immediately (the window
+# will expire and need another cycle before the target).
+TARGET_RESET_UTC = os.environ.get("TARGET_RESET_UTC", "").strip()
 # The `claude setup-token` token is accepted by /v1/messages only when
 # presenting as Claude Code: requires beta header and dedicated system prompt.
 OAUTH_BETA = "oauth-2025-04-20"
@@ -94,6 +108,32 @@ def parse_reset_header(headers) -> datetime | None:
         return datetime.fromtimestamp(int(raw), tz=timezone.utc)
     except (ValueError, OSError, OverflowError):
         return None
+
+
+def compute_hold_until(now: datetime) -> datetime | None:
+    """If TARGET_RESET_UTC is set, return the earliest time we should start
+    the next window so it expires at (or near) the target. Returns None if
+    no target is configured or we can start immediately."""
+    if not TARGET_RESET_UTC:
+        return None
+    try:
+        hour, minute = map(int, TARGET_RESET_UTC.split(":"))
+    except (ValueError, TypeError):
+        log(f"WARNING: TARGET_RESET_UTC={TARGET_RESET_UTC!r} is not valid HH:MM, ignoring.")
+        return None
+
+    target_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    # Pick the next occurrence of this time
+    target = target_today if target_today > now else target_today + timedelta(days=1)
+
+    hours_until_target = (target - now).total_seconds() / 3600
+    if hours_until_target >= WINDOW_HOURS:
+        return None  # safe to start now, window will expire before target
+    # Delay: start at target - 5h so the window lands on the target
+    start_at = target - timedelta(hours=WINDOW_HOURS)
+    if start_at <= now:
+        return None  # start time already passed, start now
+    return start_at
 
 
 def describe(dt: datetime, now: datetime) -> str:
@@ -174,7 +214,13 @@ def main() -> int:
         return 0
     else:
         log(f"Previous window reset at "
-            f"{resets_at.isoformat(timespec='seconds')}: starting a new one.")
+            f"{resets_at.isoformat(timespec='seconds')}.")
+        hold_until = compute_hold_until(now)
+        if hold_until is not None:
+            log(f"Holding: TARGET_RESET_UTC={TARGET_RESET_UTC}, "
+                f"will start new window at {describe(hold_until, now)}.")
+            return 0
+        log("Starting a new window.")
 
     new_reset = send_good_morning(token)
     if new_reset is None:
